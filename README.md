@@ -470,3 +470,221 @@ curl http://core.k-27.com/profil
 ![alt text](<foto 44.png>)
 
 ## Soal 11
+
+Konfigurasikan Penny (menggunakan Apache) sebagai reverse proxy yang mengarah ke semua node di area vault (Obladi & Desmond). Sementara itu, konfigurasikan Abbey (menggunakan Nginx) sebagai reverse proxy menuju area core (Oblada & Molly). Pastikan kedua gerbang ini meneruskan identitas asli pengunjung ke server backend dengan melakukan forwarding header Host dan X-Real-IP. Buktikan bahwa Penny dan Abbey berhasil mendistribusikan lalu lintas dengan tepat.
+
+Jalankan ini di node penny :
+
+``` bash
+apt update && apt install apache2 -y
+a2enmod proxy proxy_http headers rewrite
+
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName www.k27.com
+
+    ProxyRequests Off
+    ProxyPreserveHost On
+
+    <Proxy *>
+        Require all granted
+    </Proxy>
+
+    # Forward ke salah satu core node atau Round-Robin core
+    ProxyPass / http://10.77.1.6/
+    ProxyPassReverse / http://10.77.1.6/
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
+
+service apache2 restart
+```
+
+Jalankan ini di node abbey :
+
+``` bash
+apt update && apt install nginx -y
+
+cat << 'EOF' > /etc/nginx/sites-available/default
+server {
+    listen 80;
+    listen [::]:80;
+    server_name static.k27.com;
+
+    location / {
+        # Slash di ujung alamat backend memastikan URL /arsip/ diteruskan utuh
+        proxy_pass http://10.77.1.4/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+nginx -t && service nginx restart
+```
+
+dan lakukan pengujian di node alpha dan hasil yang diharapkan adalah `HTTP 200 OK` dengan :
+
+``` bash
+curl -i http://www.k27.com/
+curl -i http://static.k27.com/arsip/
+```
+
+
+![alt text](image.png)
+![alt text](image-1.png)
+
+
+## Soal 12
+Terdapat ruang khusus di penny yang yang menyimpan dokumen rahasia sindikat, oleh karena itu terapkan perlindungan basic authentication untuk path /admin. Akses ke jalur tersebut harus menolak pengunjung tanpa kredensial, dan hanya mengizinkan masuk jika menggunakan credential.
+
+Jalankan ini di node penny :
+
+``` bash
+apt install apache2-utils -y
+
+# Buat direktori dan dokumen admin lokal
+mkdir -p /var/www/html/admin
+echo "<h1>Dokumen Rahasia Sindikat</h1>" > /var/www/html/admin/index.html
+
+# Buat file password
+htpasswd -bc /etc/apache2/.htpasswd prabs pakar_pinter_jadi_gob***
+chmod 644 /etc/apache2/.htpasswd
+
+# Konfigurasi proteksi di 000-default.conf
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName www.k27.com
+
+    DocumentRoot /var/www/html
+
+    # Proteksi Basic Auth khusus path /admin
+    <Location /admin>
+        AuthType Basic
+        AuthName "Restricted Admin Area"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+    </Location>
+
+    # Kecualikan /admin agar dilayani oleh Penny sendiri, bukan di-forward
+    ProxyPass /admin !
+
+    # Forwarding request lainnya ke core node
+    ProxyPass / http://10.77.1.6/
+    ProxyPassReverse / http://10.77.1.6/
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
+
+apache2ctl configtest && service apache2 restart
+```
+
+dan lakukan pengujian di node alpha dengan :
+
+``` bash
+# 1. Tanpa kredensial -> Wajib 401 Unauthorized
+curl -i http://www.k27.com/admin/
+
+# 2. Menggunakan kredensial -> Wajib 200 OK
+curl -i -u "prabs:pakar_pinter_jadi_gob***" http://www.k27.com/admin/
+```
+
+
+### Soal 13
+Setiap entitas dari luar harus memanggil gerbang dengan nama kanoniknya. Jika ada yang mencoba mengakses IP penny dan domain  penny.xxx.com, paksa sistem untuk melakukan redirect secara permanen (status code 301) menuju www.xxx.com. Sebaliknya, jika ada yang mengakses IP abbey dan domain abbey.xxx.com, lakukan redirect sementara (status code 302) menuju static.xxx.com.
+
+jalankan script berikut pada node penny :
+``` bash
+# Pastikan modul rewrite aktif
+a2enmod rewrite
+
+# Terapkan vhost Apache dengan aturan Rewrite 301
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName www.k27.com
+    ServerAlias penny.k27.com 10.77.4.2
+    ServerAdmin webmaster@k27.com
+
+    DocumentRoot /var/www/html
+
+    # --- Soal 13: Redirect Permanen (301) ke www.k27.com ---
+    RewriteEngine On
+    RewriteCond %{HTTP_HOST} !^www\.k27\.com$ [NC]
+    RewriteRule ^(.*)$ http://www.k27.com$1 [R=301,L]
+
+    # --- Soal 12: Basic Auth untuk path /admin ---
+    <Location /admin>
+        AuthType Basic
+        AuthName "Restricted Admin Area"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+    </Location>
+    ProxyPass /admin !
+
+    # --- Reverse Proxy Utama ke Core Area ---
+    ProxyPass / http://10.77.1.6/
+    ProxyPassReverse / http://10.77.1.6/
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
+
+# Validasi sintaks dan restart service
+apache2ctl configtest
+service apache2 restart
+```
+
+Dan jalankan script ini pada node abbey :
+``` bash
+cat << 'EOF' > /etc/nginx/sites-available/default
+# --- Soal 13: Server block khusus Redirect Sementara (302) ke static.k27.com ---
+server {
+    listen 80;
+    listen [::]:80;
+    server_name abbey.k27.com 10.77.5.2;
+
+    return 302 http://static.k27.com$request_uri;
+}
+
+# --- Server block Utama untuk static.k27.com (Reverse Proxy Vault) ---
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name static.k27.com;
+
+    location / {
+        proxy_pass http://10.77.1.4/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+# Validasi sintaks dan restart service
+nginx -t
+service nginx restart
+```
+
+Dan uji dari node alpha :
+``` bash
+# 1. Uji redirect di Penny (Harus HTTP/1.1 301 Moved Permanently)
+curl -I http://penny.k27.com/
+curl -I http://10.77.4.2/
+
+# 2. Uji redirect di Abbey (Harus HTTP/1.1 302 Moved Temporarily atau 302 Found)
+curl -I http://abbey.k27.com/arsip/
+curl -I http://10.77.5.2/arsip/
+```
+
+![alt text](image-2.png)
+
+
